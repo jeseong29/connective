@@ -1,0 +1,90 @@
+import pandas as pd
+import re
+
+def standardize_levels(text):
+    """
+    판독문 내의 L2-3, L2~3, L2/3 등 표기를 모두 L2/3 등 표준 표기법으로 변환합니다.
+    """
+    # L1-2, L1~2, L1/2 등 모두 L1/2로 변환
+    for i in range(1, 6):
+        j = i + 1 if i < 5 else 'S1'
+        # ex) L2-3, L2~3, L2 3, L2 / 3
+        pattern = rf"L\s*{i}\s*[-~/\s]\s*{j if j != 'S1' else 'S1'}"
+        repl = f"L{i}/{j}"
+        text = re.sub(pattern, repl, text, flags=re.IGNORECASE)
+    return text
+
+def classify_lumbar_stenosis(report_text):
+    levels = ['L1/2', 'L2/3', 'L3/4', 'L4/5', 'L5/S1']
+    stenosis_terms = [
+        r'central canal stenosis',
+        r'neural foraminal stenosis|neural foramen stenosis|foraminal stenosis|neural foramen narrowing',
+        r'lateral recess stenosis|subarticular stenosis|subarticular recess stenosis'
+    ]
+    allowed_severity = r'(moderate|severe|degenerative|grade\s*2|grade\s*3)'
+    forbidden_severity = r'(mild|grade\s*0|grade\s*1)'
+    disc_terms = r'disc (protrusion|extrusion|herniation|bulging)'
+    not_stenosis_terms = r'(compromise|compression|impingement)'
+    after_ignore = "영상의학과 전공의 응급판독입니다. 정식 판독시 내용이 바뀔수 있으니 반드시 확인하시기 바랍니다"
+
+    if pd.isna(report_text):
+        report_text = ''
+    report = report_text.split(after_ignore)[0].lower()
+
+    # ① 검사결과 내 레벨 표기를 표준화
+    report = standardize_levels(report)
+
+    result = {l: False for l in levels}
+    need_check = False
+
+    for level in levels:
+        # 'L4/5'로 시작하는 문장 조각 추출 (콜론, 마침표, 줄바꿈 전까지)
+        matches = re.findall(rf"{level}[^.:\n]*", report)
+        for seg in matches:
+            # 디스크 질환, compromise 등은 false 처리
+            if re.search(disc_terms, seg):
+                continue
+            if re.search(not_stenosis_terms, seg):
+                continue
+            # mild stenosis는 false 처리
+            if re.search(forbidden_severity + r'.*stenosis', seg):
+                continue
+            # 중증도 + stenosis 용어가 모두 있으면 true
+            for s_pat in stenosis_terms:
+                if re.search(allowed_severity + r'.*' + s_pat, seg):
+                    result[level] = True
+                    break
+            if result[level]:
+                break
+
+    # 레벨명 모두 제거한 후에도 stenosis 단어 존재하면 need_check = True
+    report_wo_levels = report
+    for level in levels:
+        # '/', '-' 포함 다양한 구분자 처리
+        lvl_pattern = level.replace('/', r'[/\- ]')
+        report_wo_levels = re.sub(lvl_pattern, '', report_wo_levels, flags=re.IGNORECASE)
+    if re.search(rf'({allowed_severity} )?(central canal|foraminal|lateral recess|subarticular)[ \w\-]*stenosis', report_wo_levels):
+        need_check = True
+
+    result['need_check'] = need_check
+    return result
+
+# 엑셀파일 경로
+input_path = '/STEN_cohort_SMC_preprocess.xlsx'
+df = pd.read_excel(input_path, sheet_name='Sheet2')
+
+def apply_classify(text):
+    res = classify_lumbar_stenosis(text)
+    return pd.Series([
+        res['L1/2'],
+        res['L2/3'],
+        res['L3/4'],
+        res['L4/5'],
+        res['L5/S1'],
+        res['need_check']
+    ])
+
+df[['L1/2', 'L2/3', 'L3/4', 'L4/5', 'L5/S1', 'need_check']] = df['검사결과'].fillna('').apply(apply_classify)
+
+print(df[['L1/2', 'L2/3', 'L3/4', 'L4/5', 'L5/S1', 'need_check']].head())
+df.to_excel('labeling_mid.xlsx', index=False)
